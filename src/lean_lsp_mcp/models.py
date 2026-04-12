@@ -53,6 +53,46 @@ class DiagnosticMessage(BaseModel):
     column: int = Field(description="Column (1-indexed)")
 
 
+class LeanExtractSpec(BaseModel):
+    block: str = Field(
+        description="Exact source block to extract, serialized with literal \\n"
+    )
+    name: str = Field(description="Scaffold suffix name")
+
+
+class LeanExtractApplied(BaseModel):
+    name: str = Field(description="Scaffold suffix name")
+    full_decl_name: str = Field(description="Fully qualified scaffold declaration name")
+    occurrence_index: int = Field(
+        description="1-indexed occurrence among matching blocks in source order"
+    )
+    block_start_line: int = Field(description="Original block start line (1-indexed)")
+    block_end_line: int = Field(description="Original block end line (1-indexed)")
+    insert_decl_start_line: int = Field(
+        description="Inserted or updated declaration start line (1-indexed)"
+    )
+    insert_decl_end_line: int = Field(
+        description="Inserted or updated declaration end line (1-indexed)"
+    )
+    signature: str = Field(description="Captured scaffold signature")
+
+
+class LeanExtractJob(BaseModel):
+    owner_decl: str = Field(description="Owning top-level declaration name")
+    extractions: List[LeanExtractSpec] = Field(
+        default_factory=list,
+        description="Extraction blocks for one owning declaration",
+    )
+
+
+class LeanExtractBatchApplied(BaseModel):
+    owner_decl: str = Field(description="Owning top-level declaration name")
+    applied: List[LeanExtractApplied] = Field(
+        default_factory=list,
+        description="Applied extraction entries for this declaration in request order",
+    )
+
+
 class GoalState(BaseModel):
     line_context: str = Field(description="Source line where goals were queried")
     goals: Optional[List[str]] = Field(
@@ -169,6 +209,22 @@ class DiagnosticsResult(BaseModel):
     failed_dependencies: List[str] = Field(
         default_factory=list,
         description="File paths of dependencies that failed to build",
+    )
+
+
+class LeanExtractBatchResult(BaseModel):
+    success: bool = Field(description="Whether extraction succeeded (no Lean errors)")
+    applied_by_decl: List[LeanExtractBatchApplied] = Field(
+        default_factory=list,
+        description="Applied extraction entries grouped by owner declaration",
+    )
+    diagnostics: List[DiagnosticMessage] = Field(
+        default_factory=list,
+        description="Diagnostics after wrapper insertion (errors kept in file)",
+    )
+    error: Optional[str] = Field(
+        None,
+        description="Error message when extraction fails",
     )
 
 

@@ -1,10 +1,12 @@
 INSTRUCTIONS = """## General Rules
 - All line and column numbers are 1-indexed.
-- This MCP does NOT edit files. Use other tools for editing.
+- Most Lean MCP tools are read-only.
+- The editing exception is **lean_extract**: it rewrites the target Lean file to insert `extract` wrappers and top-level scaffold stubs.
 
 ## Key Tools
 - **lean_goal**: Proof state at position. Omit `column` for before/after. "no goals" = done!
 - **lean_diagnostic_messages**: Compiler errors/warnings. "no goals to be solved" = remove tactics.
+- **lean_extract**: Whole-file extraction helper. Input is `file_path` and `jobs=[{owner_decl, extractions=[{block,name}, ...]}, ...]`. Auto-inserts `import Extraction` if missing, processes all declarations in source order in one pass. On Lean errors the file is kept as-is and diagnostics are returned.
 - **lean_hover_info**: Type signature + docs. Column at START of identifier.
 - **lean_completions**: IDE autocomplete on incomplete code.
 - **lean_local_search**: Fast local declaration search. Use BEFORE trying a lemma name.
@@ -38,5 +40,6 @@ List tools return JSON arrays. Empty = `[]`.
 
 ## Error Handling
 Check `isError` in responses: `true` means failure (timeout/LSP error), while `[]` with `isError: false` means no results found.
+- `lean_extract` returns structured JSON with `success`, `applied_by_decl`, `diagnostics`, and `error`.
 
 """

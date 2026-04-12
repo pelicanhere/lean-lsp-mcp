@@ -44,6 +44,7 @@ from lean_lsp_mcp.file_utils import (
     require_lean_project_path,
 )
 from lean_lsp_mcp.instructions import INSTRUCTIONS
+from lean_lsp_mcp.lean_extract import run_lean_extract
 from lean_lsp_mcp.loogle import LoogleManager, loogle_remote
 from lean_lsp_mcp.repl import Repl, repl_enabled
 from lean_lsp_mcp.models import (
@@ -65,6 +66,8 @@ from lean_lsp_mcp.models import (
     HoverInfo,
     LeanFinderResult,
     LeanFinderResults,
+    LeanExtractBatchResult,
+    LeanExtractJob,
     LeanSearchResult,
     LeanSearchResults,
     LocalSearchResult,
@@ -589,38 +592,6 @@ async def _run_build(
         active_proc = proc
         return proc
 
-    async def _handle_build_output_line(line_str: str) -> None:
-        line_str = line_str.rstrip()
-
-        if line_str.startswith("trace:") or "LEAN_PATH=" in line_str:
-            return
-
-        log_lines.append(line_str)
-        if "error" in line_str.lower():
-            errors.append(line_str)
-
-        if m := re.search(
-            r"\[(\d+)/(\d+)\]\s*(.+?)(?:\s+\(\d+\.?\d*[ms]+\))?$", line_str
-        ):
-            await _safe_report_progress(
-                ctx,
-                progress=int(m.group(1)),
-                total=int(m.group(2)),
-                message=m.group(3) or "Building",
-            )
-
-    async def _consume_build_output(proc: asyncio.subprocess.Process) -> None:
-        assert proc.stdout is not None
-        remainder = ""
-        while chunk := await proc.stdout.read(64 * 1024):
-            parts = (remainder + chunk.decode("utf-8", errors="replace")).split("\n")
-            remainder = parts.pop()
-            for line_str in parts:
-                await _handle_build_output_line(line_str)
-
-        if remainder:
-            await _handle_build_output_line(remainder)
-
     try:
         clients_to_close: list[LeanLSPClient] = []
         with CLIENT_LOCK:
@@ -645,29 +616,15 @@ async def _run_build(
             await _safe_report_progress(
                 ctx, progress=1, total=16, message="Running `lake clean`"
             )
-            clean_proc = await _run_proc(
-                "lake",
-                "clean",
-                cwd=lean_project_path_obj,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            await _consume_build_output(clean_proc)
+            clean_proc = await _run_proc("lake", "clean", cwd=lean_project_path_obj)
             await clean_proc.wait()
 
         await _safe_report_progress(
             ctx, progress=2, total=16, message="Running `lake exe cache get`"
         )
         cache_proc = await _run_proc(
-            "lake",
-            "exe",
-            "cache",
-            "get",
-            cwd=lean_project_path_obj,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
+            "lake", "exe", "cache", "get", cwd=lean_project_path_obj
         )
-        await _consume_build_output(cache_proc)
         await cache_proc.wait()
 
         # Run build with progress reporting
@@ -680,7 +637,27 @@ async def _run_build(
             stderr=asyncio.subprocess.STDOUT,
         )
 
-        await _consume_build_output(process)
+        while line := await process.stdout.readline():
+            line_str = line.decode("utf-8", errors="replace").rstrip()
+
+            if line_str.startswith("trace:") or "LEAN_PATH=" in line_str:
+                continue
+
+            log_lines.append(line_str)
+            if "error" in line_str.lower():
+                errors.append(line_str)
+
+            # Parse progress: "[2/8] Building Foo (1.2s)" -> (2, 8, "Building Foo")
+            if m := re.search(
+                r"\[(\d+)/(\d+)\]\s*(.+?)(?:\s+\(\d+\.?\d*[ms]+\))?$", line_str
+            ):
+                await _safe_report_progress(
+                    ctx,
+                    progress=int(m.group(1)),
+                    total=int(m.group(2)),
+                    message=m.group(3) or "Building",
+                )
+
         await process.wait()
 
         if process.returncode != 0:
@@ -904,6 +881,45 @@ def diagnostic_messages(
         severity=severity,
         timed_out=getattr(result, "timed_out", False),
     )
+
+
+@mcp.tool(
+    "lean_extract",
+    annotations=ToolAnnotations(
+        title="Extract Local Blocks",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=False,
+    ),
+)
+def lean_extract(
+    ctx: Context,
+    file_path: Annotated[
+        str, Field(description="Absolute or project-root-relative path to Lean file")
+    ],
+    jobs: Annotated[
+        List[LeanExtractJob],
+        Field(description="Extraction jobs grouped by owning declaration"),
+    ],
+) -> LeanExtractBatchResult:
+    """Insert extract wrappers for all declarations in one pass.
+
+    Auto-inserts `import Extraction` if missing. On Lean errors the file is
+    kept as-is (no revert) and diagnostics are returned in the result.
+    """
+    rel_path = setup_client_for_file(ctx, file_path)
+    if not rel_path:
+        _raise_invalid_path(file_path)
+
+    try:
+        policy = get_path_policy(ctx)
+        abs_path = policy.validate_path(resolve_file_path(ctx, file_path))
+    except (FileNotFoundError, ValueError) as exc:
+        raise LeanToolError(str(exc)) from exc
+
+    client: LeanLSPClient = ctx.request_context.lifespan_context.client
+    return run_lean_extract(client, abs_path, rel_path, jobs)
 
 
 @mcp.tool(
