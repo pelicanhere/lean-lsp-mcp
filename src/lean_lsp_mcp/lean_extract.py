@@ -114,7 +114,13 @@ def _get_first_line_indent(content: str, start_idx: int) -> str:
     else:
         line_start += 1
     prefix = content[line_start:start_idx]
-    return prefix if not prefix or prefix.isspace() else ""
+    if not prefix or prefix.isspace():
+        return prefix
+
+    # If matching starts after non-whitespace on the same line
+    # (for example in `· intro h`), keep the visual column so the
+    # extracted block body is not forced to column 1.
+    return " " * len(prefix)
 
 
 def _get_last_line_indent(block_text: str) -> str:
