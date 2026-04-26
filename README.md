@@ -661,7 +661,7 @@ Enable fast REPL-based `lean_multi_attempt` for line-based attempts (~5x faster)
 
 ```toml
 [[require]]
-name = "repl"
+name = "REPL"
 git = "https://github.com/leanprover-community/repl"
 rev = "v4.25.0"  # Match your Lean version
 ```
