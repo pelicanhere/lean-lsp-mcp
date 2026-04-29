@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import textwrap
+import types
 
 from lean_lsp_mcp.utils import (
     OptionalTokenVerifier,
@@ -15,6 +17,7 @@ from lean_lsp_mcp.utils import (
     find_start_position,
     format_diagnostics,
     format_line,
+    get_declaration_range,
     is_build_stderr,
 )
 
@@ -76,6 +79,110 @@ def test_find_start_position() -> None:
     content = "foo\nbar baz"
     assert find_start_position(content, "bar") == {"line": 1, "column": 0}
     assert find_start_position(content, "missing") is None
+
+
+class _DeclarationRangeClient:
+    def __init__(self, content: str, symbols: list[dict] | None = None) -> None:
+        self.content = content
+        self.symbols = symbols or []
+        self.opened_paths: list[str] = []
+        self.symbol_paths: list[str] = []
+
+    def open_file(self, path: str) -> None:
+        self.opened_paths.append(path)
+
+    def get_file_content(self, _path: str) -> str:
+        return self.content
+
+    def get_document_symbols(self, path: str) -> list[dict]:
+        self.symbol_paths.append(path)
+        return self.symbols
+
+
+class _DeclarationRangeLogger:
+    def debug(self, *_args, **_kwargs) -> None:
+        pass
+
+    def warning(self, *_args, **_kwargs) -> None:
+        pass
+
+
+def _get_declaration_range(*args, **kwargs) -> tuple[int, int] | None:
+    missing = object()
+    previous_server = sys.modules.get("lean_lsp_mcp.server", missing)
+    sys.modules["lean_lsp_mcp.server"] = types.SimpleNamespace(
+        logger=_DeclarationRangeLogger()
+    )
+    try:
+        return get_declaration_range(*args, **kwargs)
+    finally:
+        if previous_server is missing:
+            sys.modules.pop("lean_lsp_mcp.server", None)
+        else:
+            sys.modules["lean_lsp_mcp.server"] = previous_server
+
+
+def test_get_declaration_range_scans_private_declarations_before_symbols() -> None:
+    content = textwrap.dedent(
+        """
+        import Mathlib
+
+        private lemma privateHelper (n : Nat) :
+            n = n := by
+          rfl
+
+        theorem publicThing : True := by
+          trivial
+        """
+    ).strip()
+    client = _DeclarationRangeClient(content)
+
+    assert _get_declaration_range(client, "Foo.lean", "privateHelper") == (3, 6)
+    assert client.symbol_paths == []
+
+
+def test_get_declaration_range_uses_current_file_content_before_stale_symbols() -> None:
+    content = textwrap.dedent(
+        """
+        lemma initial_lemma : 1 = 1 := by rfl
+
+        lemma race_target : 1 = 1 := by
+          rfl
+        """
+    ).strip()
+    client = _DeclarationRangeClient(
+        content,
+        symbols=[
+            {
+                "name": "initial_lemma",
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 0, "character": 37},
+                },
+            }
+        ],
+    )
+
+    assert _get_declaration_range(client, "Foo.lean", "race_target") == (3, 4)
+    assert client.symbol_paths == []
+
+
+def test_get_declaration_range_falls_back_to_document_symbols() -> None:
+    client = _DeclarationRangeClient(
+        "import Mathlib\n",
+        symbols=[
+            {
+                "name": "publicThing",
+                "range": {
+                    "start": {"line": 4, "character": 0},
+                    "end": {"line": 6, "character": 10},
+                },
+            }
+        ],
+    )
+
+    assert _get_declaration_range(client, "Foo.lean", "publicThing") == (5, 7)
+    assert client.symbol_paths == ["Foo.lean"]
 
 
 def test_format_line_with_cursor() -> None:

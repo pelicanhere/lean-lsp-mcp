@@ -364,10 +364,139 @@ def search_symbols(symbols: List[Dict], target_name: str) -> Dict | None:
     return None
 
 
+_DECLARATION_KEYWORDS = (
+    "theorem",
+    "lemma",
+    "def",
+    "abbrev",
+    "class",
+    "instance",
+    "structure",
+    "inductive",
+    "axiom",
+    "opaque",
+)
+_DECLARATION_MODIFIERS = (
+    "private",
+    "protected",
+    "noncomputable",
+    "unsafe",
+    "partial",
+    "local",
+    "scoped",
+)
+_COMMAND_BOUNDARY_KEYWORDS = _DECLARATION_KEYWORDS + (
+    "namespace",
+    "section",
+    "end",
+    "open",
+    "variable",
+    "variables",
+    "universe",
+    "universes",
+    "set_option",
+    "attribute",
+    "export",
+    "initialize",
+    "builtin_initialize",
+    "syntax",
+    "macro",
+    "elab",
+    "notation",
+    "infix",
+    "infixl",
+    "infixr",
+    "prefix",
+    "postfix",
+)
+_DECLARATION_PREFIX_PATTERN = (
+    r"(?:@\[[^\]]*\]\s*)*"
+    rf"(?:(?:{'|'.join(_DECLARATION_MODIFIERS)})\s+)*"
+)
+_DECLARATION_NAME_END_PATTERN = r"(?=$|[\s:\(\{\[])"
+
+
+def _skip_comment_only_line(
+    stripped_line: str, block_comment_depth: int
+) -> tuple[bool, int]:
+    """Return whether a stripped line is comment-only and the next block depth."""
+    if block_comment_depth:
+        block_comment_depth += stripped_line.count("/-")
+        block_comment_depth -= stripped_line.count("-/")
+        return True, max(block_comment_depth, 0)
+
+    if stripped_line.startswith("/-"):
+        block_comment_depth += stripped_line.count("/-")
+        block_comment_depth -= stripped_line.count("-/")
+        return True, max(block_comment_depth, 0)
+
+    return stripped_line.startswith("--"), block_comment_depth
+
+
+def _scan_declaration_range(
+    content: str, declaration_name: str
+) -> tuple[int, int] | None:
+    """Find a declaration range from current Lean source text."""
+    lines = content.splitlines()
+    keywords = "|".join(_DECLARATION_KEYWORDS)
+    decl_re = re.compile(
+        rf"^{_DECLARATION_PREFIX_PATTERN}(?:{keywords})\s+"
+        rf"{re.escape(declaration_name)}{_DECLARATION_NAME_END_PATTERN}"
+    )
+
+    start_index = None
+    start_indent = 0
+    block_comment_depth = 0
+    for index, line in enumerate(lines):
+        stripped = line.lstrip()
+        if not stripped:
+            continue
+
+        skip, block_comment_depth = _skip_comment_only_line(
+            stripped, block_comment_depth
+        )
+        if skip:
+            continue
+
+        if decl_re.match(stripped):
+            start_index = index
+            start_indent = len(line) - len(stripped)
+            break
+
+    if start_index is None:
+        return None
+
+    boundary_keywords = "|".join(_COMMAND_BOUNDARY_KEYWORDS)
+    boundary_re = re.compile(
+        rf"^(?:#|{_DECLARATION_PREFIX_PATTERN}(?:{boundary_keywords})\b)"
+    )
+
+    block_comment_depth = 0
+    end_line = len(lines)
+    for index in range(start_index + 1, len(lines)):
+        line = lines[index]
+        stripped = line.lstrip()
+        if not stripped:
+            continue
+
+        skip, block_comment_depth = _skip_comment_only_line(
+            stripped, block_comment_depth
+        )
+        if skip:
+            continue
+
+        indent = len(line) - len(stripped)
+        if indent <= start_indent and boundary_re.match(stripped):
+            end_line = index
+            break
+
+    return (start_index + 1, end_line)
+
+
 def get_declaration_range(
     client, file_path: str, declaration_name: str
 ) -> tuple[int, int] | None:
-    """Get the line range (1-indexed) of a declaration by name using LSP document symbols.
+    """Get the line range (1-indexed) of a declaration by name.
 
     Args:
         client: The Lean LSP client instance (LeanLSPClient)
@@ -383,7 +512,18 @@ def get_declaration_range(
         # Ensure file is opened (LSP needs this to analyze the file)
         client.open_file(file_path)
 
-        # Get document symbols from LSP
+        try:
+            content = client.get_file_content(file_path)
+        except Exception as e:
+            logger.debug(
+                "Failed to read current file content for '%s': %s", file_path, e
+            )
+        else:
+            text_range = _scan_declaration_range(content, declaration_name)
+            if text_range is not None:
+                return text_range
+
+        # Fall back to document symbols for declaration forms the text scan misses.
         symbols = client.get_document_symbols(file_path)
 
         if not symbols:
