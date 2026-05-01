@@ -35,6 +35,70 @@ class _TopLevelDecl:
 
 
 # ---------------------------------------------------------------------------
+# Comment masking
+# ---------------------------------------------------------------------------
+
+def _mask_lean_comments(content: str) -> str:
+    """Return content with all comment regions replaced by spaces.
+
+    Newlines and total length are preserved so character offsets and line
+    numbers map 1:1 to the original. Handles:
+      - Line comments `-- ...`
+      - Block comments `/- ... -/` (nestable)
+      - Doc comments `/-- ... -/` (a nestable block-comment variant)
+      - String literals `"..."` are preserved so `--` inside them is kept.
+    """
+    out: List[str] = []
+    i = 0
+    n = len(content)
+    while i < n:
+        c = content[i]
+        if c == "/" and i + 1 < n and content[i + 1] == "-":
+            out.append("  ")
+            i += 2
+            depth = 1
+            while i < n and depth > 0:
+                if i + 1 < n and content[i] == "/" and content[i + 1] == "-":
+                    out.append("  ")
+                    i += 2
+                    depth += 1
+                elif i + 1 < n and content[i] == "-" and content[i + 1] == "/":
+                    out.append("  ")
+                    i += 2
+                    depth -= 1
+                elif content[i] == "\n":
+                    out.append("\n")
+                    i += 1
+                else:
+                    out.append(" ")
+                    i += 1
+            continue
+        if c == "-" and i + 1 < n and content[i + 1] == "-":
+            while i < n and content[i] != "\n":
+                out.append(" ")
+                i += 1
+            continue
+        if c == '"':
+            out.append(c)
+            i += 1
+            while i < n:
+                if content[i] == "\\" and i + 1 < n:
+                    out.append(content[i])
+                    out.append(content[i + 1])
+                    i += 2
+                    continue
+                out.append(content[i])
+                if content[i] == '"':
+                    i += 1
+                    break
+                i += 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+# ---------------------------------------------------------------------------
 # Block-finding helpers
 # ---------------------------------------------------------------------------
 
@@ -50,24 +114,30 @@ def find_code_block(
     code_block: str,
     used_ranges: List[Tuple[int, int]],
 ) -> Optional[Tuple[int, int]]:
-    """Find code_block in original_content, skipping used_ranges.
+    """Find code_block in original_content, skipping used_ranges and comments.
 
-    Tries exact match first, then fuzzy indent-insensitive match.
-    Returns (start_idx, end_idx) or None.
+    Tries exact match first, then fuzzy indent-insensitive match. Both searches
+    operate on a comment-masked view so matches never land inside `--` line
+    comments or `/- ... -/` block comments. Indices are valid in the original
+    content because masking preserves character offsets.
     """
+    masked_content = _mask_lean_comments(original_content)
+    masked_block = _mask_lean_comments(code_block)
+
     # 1. Exact match
     search_start = 0
     while True:
-        idx = original_content.find(code_block, search_start)
+        idx = masked_content.find(masked_block, search_start)
         if idx == -1:
             break
-        end = idx + len(code_block)
+        end = idx + len(masked_block)
         if not check_overlap(idx, end, used_ranges):
             return (idx, end)
         search_start = end
 
-    # 2. Fuzzy match — strip each line, build whitespace-tolerant regex
-    lines = [line.strip() for line in code_block.splitlines() if line.strip()]
+    # 2. Fuzzy match — strip each line, build whitespace-tolerant regex.
+    # Comment-only lines mask to whitespace and are dropped here.
+    lines = [line.strip() for line in masked_block.splitlines() if line.strip()]
     if not lines:
         return None
 
@@ -82,7 +152,7 @@ def find_code_block(
 
     try:
         fuzzy_regex = re.compile(pattern_str)
-        for match in fuzzy_regex.finditer(original_content):
+        for match in fuzzy_regex.finditer(masked_content):
             f_start, f_end = match.span()
             first_line = lines[0]
             first_line_offset = match.group(0).find(first_line)
@@ -293,8 +363,13 @@ def _join_lines(lines: Sequence[str], trailing_newline: bool) -> str:
 
 
 def _scan_top_level_declarations(lines: Sequence[str]) -> List[_TopLevelDecl]:
+    # Mask comments so `def`/`theorem`/`lemma`/`example` tokens that live
+    # inside `/- ... -/` blocks or after `--` aren't mistaken for real decls.
+    # Masking preserves length and newlines, so line indices stay aligned.
+    masked_lines = _mask_lean_comments("\n".join(lines)).split("\n")
+
     starts: List[tuple[int, str, str]] = []
-    for idx, line in enumerate(lines):
+    for idx, line in enumerate(masked_lines):
         if line.startswith(" ") or line.startswith("\t"):
             continue
         match = TOP_LEVEL_DECL_RE.match(line)
